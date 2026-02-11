@@ -8,6 +8,7 @@ const {
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs-extra');
+const os = require('os');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -15,19 +16,16 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// ============ SIMPLE SQLITE AUTH - NO COMPLEXITY ============
+// ============ SQLITE SETUP ============
 const sqlite3 = require('sqlite3').verbose();
 const db = new sqlite3.Database('./sessions.db');
-
-// Create table - ONE TABLE, SIMPLE
 db.run(`CREATE TABLE IF NOT EXISTS sessions (
   phone TEXT PRIMARY KEY,
-  session_data TEXT,
   base64 TEXT,
   created_at INTEGER
 )`);
 
-// ============ EXACT SAME METHOD THAT WORKED ============
+// ============ FIXED: EXACT USERLAND MATCH ============
 app.get('/api/pair', async (req, res) => {
   try {
     let { phone } = req.query;
@@ -42,19 +40,23 @@ app.get('/api/pair', async (req, res) => {
 
     console.log(`📱 Pairing: ${phone}`);
 
-    // ============ USE EXACT MULTIFILE METHOD ============
-    // Create temp session folder - works exactly like userland
-    const sessionDir = `./temp_${phone}`;
+    // Create unique session folder
+    const sessionDir = `./temp_${phone}_${Date.now()}`;
     await fs.ensureDir(sessionDir);
     
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
     
+    // ============ CRITICAL FIX: EXACT USERLAND CONFIG ============
     const sock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: ["Ubuntu", "Chrome", "20"] // Works with notifications
+      browser: ["Ubuntu", "Chrome", "20"], // Same as userland
+      syncFullHistory: false,
+      generateHighQualityLink: false,
+      defaultQueryTimeoutMs: 60000,
+      // Don't override any other settings - keep exactly like userland
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -73,23 +75,23 @@ app.get('/api/pair', async (req, res) => {
       pairing_code: formattedCode
     });
 
-    // Wait for connection
+    // ============ FIXED: BETTER CONNECTION HANDLING ============
+    let connected = false;
+    
     sock.ev.on('connection.update', async (update) => {
-      const { connection } = update;
+      const { connection, lastDisconnect } = update;
       
-      if (connection === 'open') {
-        console.log(`✅ Connected: ${phone}`);
+      if (connection === 'open' && !connected) {
+        connected = true;
+        console.log(`✅ Connected: ${phone} as Ubuntu/Chrome`);
         
-        // Wait 5 seconds for stability
-        await new Promise(r => setTimeout(r, 5000));
+        // Wait longer for notifications to register
+        await new Promise(r => setTimeout(r, 8000));
         
-        // ============ READ CREDS.JSON LIKE USERLAND ============
+        // Read creds.json
         const credsPath = `${sessionDir}/creds.json`;
         if (fs.existsSync(credsPath)) {
-          // Read the creds file
-          const credsData = fs.readFileSync(credsPath, 'utf8');
-          
-          // Convert entire session folder to Base64
+          // Package entire session folder
           const sessionFiles = {};
           const files = await fs.readdir(sessionDir);
           for (const file of files) {
@@ -102,24 +104,40 @@ app.get('/api/pair', async (req, res) => {
           
           // Save to SQLite
           db.run(
-            'INSERT OR REPLACE INTO sessions (phone, session_data, base64, created_at) VALUES (?, ?, ?, ?)',
-            [phone, credsData, base64Session, Date.now()]
+            'INSERT OR REPLACE INTO sessions (phone, base64, created_at) VALUES (?, ?, ?)',
+            [phone, base64Session, Date.now()]
           );
           
           console.log(`✅ Session saved for: ${phone}`);
         }
         
-        // Keep connected for 30 seconds then cleanup like userland
+        // Keep connected for 45 seconds - longer for notifications
         setTimeout(async () => {
           sock.end();
           await fs.remove(sessionDir);
           console.log(`🧹 Cleaned: ${phone}`);
-        }, 30000);
+        }, 45000);
+      }
+      
+      if (connection === 'close') {
+        const reason = lastDisconnect?.error?.output?.statusCode;
+        if (reason === DisconnectReason.loggedOut) {
+          console.log(`🚫 Logged out: ${phone}`);
+        }
       }
     });
 
+    // Auto-cleanup after 2 minutes
+    setTimeout(async () => {
+      if (!connected) {
+        sock.end();
+        await fs.remove(sessionDir);
+        console.log(`⏰ Timeout: ${phone}`);
+      }
+    }, 120000);
+
   } catch (error) {
-    console.error(`❌ Error for ${req.query.phone}:`, error.message);
+    console.error(`❌ Error: ${error.message}`);
     res.json({
       megan_md: false,
       success: false,
@@ -129,7 +147,7 @@ app.get('/api/pair', async (req, res) => {
   }
 });
 
-// ============ GET SESSION - SIMPLE ============
+// ============ GET SESSION ============
 app.get('/api/session', (req, res) => {
   const phone = req.query.phone?.replace(/\D/g, '');
   if (!phone) {
@@ -150,15 +168,22 @@ app.get('/api/session', (req, res) => {
   });
 });
 
-// ============ HEALTH ============
+// ============ STATUS ============
 app.get('/', (req, res) => {
   res.json({ 
     megan_md: true, 
     status: 'online',
-    message: 'Send /api/pair?phone=254XXXXXXXXX' 
+    version: '1.0',
+    browser: 'Ubuntu Chrome 20'
   });
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Megan-MD API on port ${PORT}`);
+  console.log(`
+╔════════════════════════════════════╗
+║  Megan-MD API - Ubuntu Chrome 20   ║
+║  Port: ${PORT}                           ║
+║  Status: ONLINE                    ║
+╚════════════════════════════════════╝
+  `);
 });
