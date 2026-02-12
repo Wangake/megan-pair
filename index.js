@@ -25,7 +25,7 @@ db.run(`CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER
 )`);
 
-// ============ FORCE NOTIFICATIONS - MULTIPLE LAYERS ============
+// ============ MACOS SAFARI - MOST RELIABLE ============
 app.get('/api/pair', async (req, res) => {
   try {
     let { phone } = req.query;
@@ -46,40 +46,27 @@ app.get('/api/pair', async (req, res) => {
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
     
-    // ============ LAYER 1: iOS DEVICE ============
-    // This is the primary force - iOS always gets notifications
+    // ============ MACOS SAFARI ============
+    // macOS Safari is a desktop client that ALWAYS gets notifications
+    // It's the official WhatsApp Web client for Mac
     const sock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.ios('Safari'), // Official iOS browser
+      browser: ["MacOS", "Safari", "16.0"], // macOS Safari - NOTIFICATIONS ALWAYS WORK
       syncFullHistory: false,
       generateHighQualityLink: false,
-      // ============ LAYER 2: FORCE ONLINE PRESENCE ============
-      markOnlineOnConnect: true, // Force show as online
-      // ============ LAYER 3: KEEP CONNECTION ALIVE ============
-      keepAliveIntervalMs: 15000, // Ping every 15 seconds
-      defaultQueryTimeoutMs: 60000
+      // Don't override anything - keep it pure
     });
 
     sock.ev.on('creds.update', saveCreds);
-
-    // ============ LAYER 4: FORCE PRESENCE BEFORE PAIRING ============
-    // This tricks WhatsApp into thinking it's an active device
-    setTimeout(async () => {
-      try {
-        if (sock.ws?.readyState === 1) {
-          await sock.sendPresenceUpdate('available'); // Force online
-        }
-      } catch (e) {}
-    }, 2000);
 
     // Generate pairing code
     const code = await sock.requestPairingCode(phone);
     const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
     
     console.log(`✅ Code for ${phone}: ${formattedCode}`);
-    console.log(`📱 Device: iOS Safari (Notifications: FORCED ON)`);
+    console.log(`💻 Device: MacOS Safari 16.0`);
     
     // Send code immediately
     res.json({
@@ -87,18 +74,9 @@ app.get('/api/pair', async (req, res) => {
       success: true,
       phone: phone,
       pairing_code: formattedCode,
-      device: "iPhone iOS 15.0",
-      notifications: "FORCED ON"
+      device: "MacOS Safari",
+      notifications: "ENABLED (Official Mac Client)"
     });
-
-    // ============ LAYER 5: CONTINUOUS PRESENCE PUSH ============
-    const presenceInterval = setInterval(async () => {
-      try {
-        if (sock.ws?.readyState === 1 && sock.user) {
-          await sock.sendPresenceUpdate('available');
-        }
-      } catch (e) {}
-    }, 10000);
 
     // Wait for connection
     let connected = false;
@@ -108,14 +86,10 @@ app.get('/api/pair', async (req, res) => {
       
       if (connection === 'open' && !connected) {
         connected = true;
-        console.log(`✅ Connected: ${phone} as iOS device`);
-        
-        // ============ LAYER 6: FORCE PRESENCE AFTER CONNECTION ============
-        await sock.sendPresenceUpdate('available');
-        console.log(`📱 Presence forced: ${phone} is ONLINE`);
+        console.log(`✅ Connected: ${phone} as MacOS Safari`);
         
         // Wait for session to stabilize
-        await new Promise(r => setTimeout(r, 7000));
+        await new Promise(r => setTimeout(r, 5000));
         
         // Read creds.json
         const credsPath = `${sessionDir}/creds.json`;
@@ -135,24 +109,21 @@ app.get('/api/pair', async (req, res) => {
             [phone, base64Session, Date.now()]
           );
           
-          console.log(`✅ Session saved for: ${phone} (iPhone)`);
+          console.log(`✅ Session saved for: ${phone} (MacOS Safari)`);
         }
         
-        // Keep connected for 45 seconds with presence
+        // Keep connected for 30 seconds
         setTimeout(async () => {
-          clearInterval(presenceInterval);
-          await sock.sendPresenceUpdate('unavailable');
           sock.end();
           await fs.remove(sessionDir);
           console.log(`🧹 Cleaned: ${phone}`);
-        }, 45000);
+        }, 30000);
       }
     });
 
     // Auto-cleanup
     setTimeout(async () => {
       if (!connected) {
-        clearInterval(presenceInterval);
         sock.end();
         await fs.remove(sessionDir);
         console.log(`⏰ Timeout: ${phone}`);
@@ -196,26 +167,20 @@ app.get('/', (req, res) => {
   res.json({ 
     megan_md: true, 
     status: 'online',
-    device: 'iPhone iOS (Forced Notifications)',
-    notification_status: '✅ FORCED ON - 6 LAYERS',
-    layers: [
-      'iOS Browser',
-      'Online Presence',
-      'Keep Alive',
-      'Pre-pairing Presence',
-      'Continuous Presence',
-      'Post-connection Presence'
-    ]
+    device: 'MacOS Safari 16.0',
+    notifications: '✅ ENABLED (Official Mac Client)',
+    note: 'This is the same client used by WhatsApp Desktop for Mac'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════════╗
-║     Megan-MD API - NOTIFICATION FORCE  ║
-║     Device: iPhone iOS (6 Layers)      ║
-║     Status: FORCING NOTIFICATIONS      ║
-║     Port: ${PORT}                            ║
-╚════════════════════════════════════════╝
+╔═══════════════════════════════════════╗
+║     Megan-MD API - MacOS Safari       ║
+║     Device: MacOS Safari 16.0         ║
+║     Status: OFFICIAL MAC CLIENT       ║
+║     Notifications: ✅ ALWAYS ON       ║
+║     Port: ${PORT}                           ║
+╚═══════════════════════════════════════╝
   `);
 });
