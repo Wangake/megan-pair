@@ -16,6 +16,10 @@ const {
 // Import AutoReact
 const AutoReact = require('./src/core/utils/autoreact');
 
+// ============ ADDED: HTTP SERVER FOR RENDER PORT ============
+const http = require('http');
+const os = require('os');
+
 class MeganBot {
     constructor() {
         this.settings = settings;
@@ -41,6 +45,7 @@ class MeganBot {
         // Store baileys instance for easy access
         this.sock = null;
         this.isConnected = false;
+        this.startTime = Date.now();
 
         // Message cache for anti-delete - SIMPLE MAP
         this.messageCache = new Map();
@@ -55,6 +60,93 @@ class MeganBot {
         this.autoReact = new AutoReact(this);
 
         this.logger.log(`Prefix set to: "${this.settings.PREFIX}"`, 'debug', '⚙️');
+        
+        // ============ ADDED: Start HTTP status server ============
+        this.startStatusServer();
+    }
+
+    // ============ ADDED: Status API Server ============
+    startStatusServer() {
+        const PORT = process.env.PORT || 3000;
+        
+        const server = http.createServer((req, res) => {
+            // Set CORS headers
+            res.setHeader('Access-Control-Allow-Origin', '*');
+            res.setHeader('Access-Control-Allow-Methods', 'GET');
+            res.setHeader('Content-Type', 'application/json');
+            
+            // Handle favicon.ico
+            if (req.url === '/favicon.ico') {
+                res.writeHead(204);
+                res.end();
+                return;
+            }
+            
+            // Status endpoint
+            if (req.url === '/status' || req.url === '/') {
+                const status = {
+                    status: this.isConnected ? 'online' : 'offline',
+                    bot: {
+                        name: settings.BOT_NAME || 'MEGAN MD',
+                        version: settings.VERSION || '1.0.0',
+                        prefix: this.settings.PREFIX,
+                        owner: settings.OWNER_NAME || 'Tracker Wanga',
+                        phone: settings.OWNER_PHONE || '254107655023'
+                    },
+                    connection: {
+                        connected: this.isConnected,
+                        user: this.baileys?.user ? {
+                            name: this.baileys.getUserName(),
+                            phone: this.baileys.user.id?.split(':')[0] || 'Unknown'
+                        } : null,
+                        uptime: this.formatUptime((Date.now() - this.startTime) / 1000)
+                    },
+                    stats: {
+                        cached_messages: this.messageCache?.size || 0,
+                        commands_loaded: this.commandHandler?.commands?.size || 0,
+                        autoreact_enabled: this.autoReact?.getStatus?.()?.enabled || false,
+                        database_connected: this.db?.isConnected?.() || true
+                    },
+                    system: {
+                        node_version: process.version,
+                        platform: os.platform(),
+                        memory_usage: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
+                        cpu_cores: os.cpus().length
+                    },
+                    timestamp: new Date().toISOString()
+                };
+                
+                res.writeHead(this.isConnected ? 200 : 503);
+                res.end(JSON.stringify(status, null, 2));
+            }
+            
+            // Health check endpoint (for Render)
+            else if (req.url === '/health') {
+                res.writeHead(this.isConnected ? 200 : 503);
+                res.end(JSON.stringify({ 
+                    status: this.isConnected ? 'healthy' : 'unhealthy',
+                    timestamp: new Date().toISOString()
+                }));
+            }
+            
+            // 404 for other routes
+            else {
+                res.writeHead(404);
+                res.end(JSON.stringify({ 
+                    error: 'Not found',
+                    available_endpoints: ['/status', '/', '/health']
+                }));
+            }
+        });
+
+        server.listen(PORT, '0.0.0.0', () => {
+            this.logger.log(`Status API server running on port ${PORT}`, 'success', '🌐');
+            this.logger.log(`Status endpoint: http://localhost:${PORT}/status`, 'info', '🔗');
+        });
+
+        server.on('error', (err) => {
+            this.logger.error(err, 'StatusServer');
+        });
     }
 
     async initialize() {
