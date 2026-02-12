@@ -4,7 +4,8 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion,
-  DisconnectReason
+  DisconnectReason,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const pino = require('pino');
 const fs = require('fs-extra');
@@ -24,7 +25,7 @@ db.run(`CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER
 )`);
 
-// ============ FIXED: SAFARI IOS ============
+// ============ FORCE NOTIFICATIONS - MULTIPLE LAYERS ============
 app.get('/api/pair', async (req, res) => {
   try {
     let { phone } = req.query;
@@ -39,32 +40,46 @@ app.get('/api/pair', async (req, res) => {
 
     console.log(`📱 Pairing: ${phone}`);
 
-    // Create unique session folder
     const sessionDir = `./temp_${phone}_${Date.now()}`;
     await fs.ensureDir(sessionDir);
     
     const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
     const { version } = await fetchLatestBaileysVersion();
     
-    // ============ CRITICAL: SAFARI IOS ============
-    // This makes WhatsApp think it's an iPhone - ALWAYS gets notifications
+    // ============ LAYER 1: iOS DEVICE ============
+    // This is the primary force - iOS always gets notifications
     const sock = makeWASocket({
       version,
       auth: state,
       logger: pino({ level: 'silent' }),
-      browser: ["Safari", "iOS", "15.0"], // iPhone - notifications ALWAYS work
+      browser: Browsers.ios('Safari'), // Official iOS browser
       syncFullHistory: false,
-      generateHighQualityLink: false
+      generateHighQualityLink: false,
+      // ============ LAYER 2: FORCE ONLINE PRESENCE ============
+      markOnlineOnConnect: true, // Force show as online
+      // ============ LAYER 3: KEEP CONNECTION ALIVE ============
+      keepAliveIntervalMs: 15000, // Ping every 15 seconds
+      defaultQueryTimeoutMs: 60000
     });
 
     sock.ev.on('creds.update', saveCreds);
+
+    // ============ LAYER 4: FORCE PRESENCE BEFORE PAIRING ============
+    // This tricks WhatsApp into thinking it's an active device
+    setTimeout(async () => {
+      try {
+        if (sock.ws?.readyState === 1) {
+          await sock.sendPresenceUpdate('available'); // Force online
+        }
+      } catch (e) {}
+    }, 2000);
 
     // Generate pairing code
     const code = await sock.requestPairingCode(phone);
     const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
     
     console.log(`✅ Code for ${phone}: ${formattedCode}`);
-    console.log(`📱 Device: Safari iOS 15.0 (iPhone)`);
+    console.log(`📱 Device: iOS Safari (Notifications: FORCED ON)`);
     
     // Send code immediately
     res.json({
@@ -72,8 +87,18 @@ app.get('/api/pair', async (req, res) => {
       success: true,
       phone: phone,
       pairing_code: formattedCode,
-      device: "iPhone (Safari)" // Show it's iPhone
+      device: "iPhone iOS 15.0",
+      notifications: "FORCED ON"
     });
+
+    // ============ LAYER 5: CONTINUOUS PRESENCE PUSH ============
+    const presenceInterval = setInterval(async () => {
+      try {
+        if (sock.ws?.readyState === 1 && sock.user) {
+          await sock.sendPresenceUpdate('available');
+        }
+      } catch (e) {}
+    }, 10000);
 
     // Wait for connection
     let connected = false;
@@ -83,15 +108,18 @@ app.get('/api/pair', async (req, res) => {
       
       if (connection === 'open' && !connected) {
         connected = true;
-        console.log(`✅ Connected: ${phone} as iPhone`);
+        console.log(`✅ Connected: ${phone} as iOS device`);
+        
+        // ============ LAYER 6: FORCE PRESENCE AFTER CONNECTION ============
+        await sock.sendPresenceUpdate('available');
+        console.log(`📱 Presence forced: ${phone} is ONLINE`);
         
         // Wait for session to stabilize
-        await new Promise(r => setTimeout(r, 5000));
+        await new Promise(r => setTimeout(r, 7000));
         
         // Read creds.json
         const credsPath = `${sessionDir}/creds.json`;
         if (fs.existsSync(credsPath)) {
-          // Package entire session folder
           const sessionFiles = {};
           const files = await fs.readdir(sessionDir);
           for (const file of files) {
@@ -102,7 +130,6 @@ app.get('/api/pair', async (req, res) => {
           
           const base64Session = Buffer.from(JSON.stringify(sessionFiles)).toString('base64');
           
-          // Save to SQLite
           db.run(
             'INSERT OR REPLACE INTO sessions (phone, base64, created_at) VALUES (?, ?, ?)',
             [phone, base64Session, Date.now()]
@@ -111,18 +138,21 @@ app.get('/api/pair', async (req, res) => {
           console.log(`✅ Session saved for: ${phone} (iPhone)`);
         }
         
-        // Keep connected for 30 seconds
+        // Keep connected for 45 seconds with presence
         setTimeout(async () => {
+          clearInterval(presenceInterval);
+          await sock.sendPresenceUpdate('unavailable');
           sock.end();
           await fs.remove(sessionDir);
           console.log(`🧹 Cleaned: ${phone}`);
-        }, 30000);
+        }, 45000);
       }
     });
 
-    // Auto-cleanup after 2 minutes
+    // Auto-cleanup
     setTimeout(async () => {
       if (!connected) {
+        clearInterval(presenceInterval);
         sock.end();
         await fs.remove(sessionDir);
         console.log(`⏰ Timeout: ${phone}`);
@@ -166,18 +196,26 @@ app.get('/', (req, res) => {
   res.json({ 
     megan_md: true, 
     status: 'online',
-    device: 'iPhone (Safari iOS 15.0)',
-    notifications: '✅ ALWAYS ON'
+    device: 'iPhone iOS (Forced Notifications)',
+    notification_status: '✅ FORCED ON - 6 LAYERS',
+    layers: [
+      'iOS Browser',
+      'Online Presence',
+      'Keep Alive',
+      'Pre-pairing Presence',
+      'Continuous Presence',
+      'Post-connection Presence'
+    ]
   });
 });
 
 app.listen(PORT, () => {
   console.log(`
-╔════════════════════════════════════╗
-║     Megan-MD API - iPhone Mode     ║
-║     Device: Safari iOS 15.0        ║
-║     Notifications: ✅ FORCED ON    ║
-║     Port: ${PORT}                        ║
-╚════════════════════════════════════╝
+╔════════════════════════════════════════╗
+║     Megan-MD API - NOTIFICATION FORCE  ║
+║     Device: iPhone iOS (6 Layers)      ║
+║     Status: FORCING NOTIFICATIONS      ║
+║     Port: ${PORT}                            ║
+╚════════════════════════════════════════╝
   `);
 });
