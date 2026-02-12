@@ -11,10 +11,11 @@ class Connection {
         this.autoViewInterval = null;
         this.isReconnecting = false;
         this.connectionAttempts = 0;
-        this.maxReconnectAttempts = 5;
+        this.maxReconnectAttempts = 10;
         this.connectionResolver = null;
         this.connectionRejector = null;
         this.connectionTimeout = null;
+        this.statusCheckInProgress = false;
     }
 
     async initializeSocket() {
@@ -33,9 +34,9 @@ class Connection {
             // Get latest version
             const { version } = await fetchLatestBaileysVersion();
 
-            // Create Pino logger for Baileys
+            // Create Pino logger for Baileys - SILENT to prevent spam
             const pinoLogger = pino({
-                level: 'silent', // We handle logging ourselves
+                level: 'fatal',
                 transport: null
             });
 
@@ -54,7 +55,8 @@ class Connection {
                 emitOwnEvents: true,
                 defaultQueryTimeoutMs: 60000,
                 mobile: false,
-                fireInitQueries: true
+                fireInitQueries: true,
+                shouldIgnoreJid: jid => jid === 'status@broadcast' || jid?.includes('newsletter') // Ignore status broadcasts to prevent auto-view
             });
 
             // Handle credentials update
@@ -76,7 +78,7 @@ class Connection {
         return new Promise((resolve, reject) => {
             this.connectionResolver = resolve;
             this.connectionRejector = reject;
-            
+
             this.connectionTimeout = setTimeout(() => {
                 reject(new Error('Connection timeout (60s)'));
             }, 60000);
@@ -126,12 +128,14 @@ class Connection {
         this.logger.log(`👑 Owner: ${this.settings.OWNER_NAME}`, 'info', '👑');
         this.logger.log(`📝 Prefix: ${this.settings.PREFIX}`, 'info', '📝');
 
-        // Send online notification to owner
-        this.sendOnlineNotification();
+        // Send online notification to owner (only once per session)
+        if (this.connectionAttempts === 0) {
+            this.sendOnlineNotification();
+        }
 
-        // Start auto-view status
+        // Start auto-view status with SAFE implementation
         if (this.settings.AUTO_VIEW_STATUS) {
-            this.startAutoViewStatus();
+            setTimeout(() => this.startAutoViewStatus(), 5000);
         }
     }
 
@@ -141,20 +145,36 @@ class Connection {
 
         const error = lastDisconnect?.error;
         const reason = error?.output?.statusCode || error?.statusCode || 0;
+        const errorMessage = error?.message || 'Unknown error';
 
-        if (this.shouldReconnect(reason)) {
+        // Check if we should reconnect
+        if (this.shouldReconnect(reason, errorMessage)) {
             this.attemptReconnect();
         } else {
-            this.logger.connection('disconnected', `Connection closed: ${error?.message || 'Unknown error'}`);
+            this.logger.connection('disconnected', `Connection closed: ${errorMessage}`);
+            
+            // Logout case
+            if (reason === 401) {
+                this.logger.log('Session expired. Please re-pair.', 'error', '🔐');
+            }
         }
     }
 
-    shouldReconnect(statusCode) {
+    shouldReconnect(statusCode, errorMessage) {
         // Don't reconnect if explicitly closed
         if (this.bot.closing) return false;
 
+        // Don't reconnect on logout
+        if (statusCode === 401) return false;
+
+        // Always try to reconnect on network errors
+        const networkErrors = ['ECONNRESET', 'ETIMEDOUT', 'ENOTFOUND', 'EPIPE', 'EAI_AGAIN'];
+        if (networkErrors.some(err => errorMessage?.includes(err))) {
+            return true;
+        }
+
         // Reconnect on these status codes
-        const reconnectCodes = [401, 403, 404, 408, 500, 502, 503, 504];
+        const reconnectCodes = [403, 404, 408, 429, 500, 502, 503, 504];
         return reconnectCodes.includes(statusCode) || 
                statusCode === undefined || 
                this.connectionAttempts < this.maxReconnectAttempts;
@@ -162,15 +182,19 @@ class Connection {
 
     async attemptReconnect() {
         if (this.isReconnecting || this.connectionAttempts >= this.maxReconnectAttempts) {
+            if (this.connectionAttempts >= this.maxReconnectAttempts) {
+                this.logger.log('Max reconnection attempts reached. Please restart manually.', 'error', '⚠️');
+            }
             return;
         }
 
         this.isReconnecting = true;
         this.connectionAttempts++;
 
-        const delay = Math.min(1000 * Math.pow(2, this.connectionAttempts), 30000);
-        
-        this.logger.log(`Attempting reconnect (${this.connectionAttempts}/${this.maxReconnectAttempts}) in ${delay}ms`, 'warning', '🔄');
+        // Exponential backoff
+        const delay = Math.min(2000 * Math.pow(1.5, this.connectionAttempts - 1), 30000);
+
+        this.logger.log(`Attempting reconnect (${this.connectionAttempts}/${this.maxReconnectAttempts}) in ${delay/1000}s`, 'warning', '🔄');
 
         setTimeout(async () => {
             try {
@@ -192,27 +216,64 @@ class Connection {
             clearInterval(this.autoViewInterval);
         }
 
+        // Don't auto-view status - it causes crashes
+        // Just log that we're skipping it
+        this.logger.log('Auto-view status disabled (skipped to prevent reconnects)', 'info', '👁️');
+        
+        // If you REALLY need auto-view, uncomment below with caution
+        /*
         this.autoViewInterval = setInterval(() => {
-            if (this.bot.isConnected && this.settings.AUTO_VIEW_STATUS) {
-                this.handleStatusUpdate();
+            if (this.bot.isConnected && this.settings.AUTO_VIEW_STATUS && !this.statusCheckInProgress) {
+                this.safeViewStatuses();
             }
-        }, 30000);
+        }, 60000); // Check every minute
+        */
+    }
 
-        this.logger.log('Auto-view status started', 'success', '👁️');
+    async safeViewStatuses() {
+        if (this.statusCheckInProgress) return;
+        
+        this.statusCheckInProgress = true;
+        
+        try {
+            if (!this.bot.sock) return;
+            
+            // Get status contacts
+            const statusJids = await this.bot.sock.getStatusJids();
+            if (!statusJids || statusJids.length === 0) return;
+            
+            // Only view first 5 statuses to prevent overload
+            const toView = statusJids.slice(0, 5);
+            
+            for (const jid of toView) {
+                try {
+                    await this.bot.sock.readMessages([{ 
+                        remoteJid: 'status@broadcast', 
+                        id: jid,
+                        participant: jid 
+                    }]);
+                    // Small delay between reads
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                } catch (e) {
+                    // Skip individual status errors silently
+                    continue;
+                }
+            }
+            
+            this.logger.log(`Viewed ${toView.length} statuses`, 'debug', '👁️');
+        } catch (error) {
+            // Silently fail - status viewing is not critical
+            this.logger.log('Status check completed (no new statuses)', 'debug', '👁️');
+        } finally {
+            this.statusCheckInProgress = false;
+        }
     }
 
     stopAutoViewStatus() {
         if (this.autoViewInterval) {
             clearInterval(this.autoViewInterval);
             this.autoViewInterval = null;
-            this.logger.log('Auto-view status stopped', 'warning', '👁️');
         }
-    }
-
-    async handleStatusUpdate() {
-        this.logger.log('Checking status updates...', 'info', '👁️');
-        // Status viewing logic can be implemented here
-        // Currently just logs for demonstration
     }
 
     async sendOnlineNotification() {
@@ -222,17 +283,22 @@ class Connection {
             const ownerJid = `${this.settings.OWNER_PHONE}@s.whatsapp.net`;
             const phone = this.bot.getPhoneNumber();
             const name = this.bot.getUserName();
+            const uptime = this.bot.formatUptime ? 
+                this.bot.formatUptime((Date.now() - this.bot.startTime) / 1000) : '0s';
 
-            await this.bot.sendMessage(ownerJid, {
+            await this.bot.sock.sendMessage(ownerJid, {
                 text: `✅ *${this.settings.BOT_NAME} Online*\n\n` +
-                      `📱 Phone: ${phone}\n` +
-                      `👤 Name: ${name}\n` +
-                      `⏰ Time: ${new Date().toLocaleString()}\n` +
-                      `🔌 Connection: Stable\n` +
-                      `📝 Prefix: ${this.settings.PREFIX}`
+                      `📱 *Phone:* ${phone}\n` +
+                      `👤 *Name:* ${name}\n` +
+                      `⏰ *Time:* ${new Date().toLocaleString()}\n` +
+                      `🕐 *Uptime:* ${uptime}\n` +
+                      `📝 *Prefix:* ${this.settings.PREFIX}\n` +
+                      `🔌 *Status:* Connected`
             });
+            
+            this.logger.log(`Online notification sent to owner`, 'success', '📨');
         } catch (error) {
-            this.logger.error(error, 'Connection.sendOnlineNotification');
+            // Silently fail - notification not critical
         }
     }
 
