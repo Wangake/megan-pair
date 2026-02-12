@@ -15,22 +15,23 @@ class CommandHandler {
         // Get ALL .js files in the commands directory
         const allFiles = fs.readdirSync(commandsDir);
 
-        // SIMPLE FILTER - only exclude index.js and obvious backups
+        // Filter to get only .js files that are not index.js or backup/old files
         const commandFiles = allFiles.filter(file => {
-            // Must be .js file
+            // Must be a .js file
             if (!file.endsWith('.js')) return false;
+
+            // Skip index.js files
+            if (file === 'index.js' || file.startsWith('index-')) return false;
             
-            // ONLY skip the main index.js file
-            if (file === 'index.js') return false;
-            
-            // Skip actual backup files (optional)
-            if (file.includes('.backup.') || file.endsWith('.backup.js')) return false;
-            
-            // ALL other .js files are command files - INCLUDING basic.js, media.js, etc.
+            // Skip backup files (optional - remove these lines if you want to include backups)
+            if (file.includes('backup')) return false;
+            if (file.includes('-backup')) return false;
+            if (file.endsWith('.backup.js')) return false;
+
             return true;
         });
 
-        this.bot.logger.log(`Found ${commandFiles.length} command files: ${commandFiles.join(', ')}`, 'success', '📁');
+        this.bot.logger.log(`Found ${commandFiles.length} command files`, 'info', '📁');
 
         let totalCommands = 0;
         
@@ -43,34 +44,50 @@ class CommandHandler {
                 
                 const commandModule = require(filePath);
                 
-                // Check if it's a function that returns commands array
                 if (typeof commandModule === 'function') {
                     const commands = commandModule(this.bot);
                     
                     if (Array.isArray(commands)) {
                         commands.forEach(cmd => {
-                            if (cmd && cmd.name && typeof cmd.execute === 'function') {
+                            if (cmd && cmd.name && cmd.execute) {
                                 this.registerCommand(cmd);
                                 totalCommands++;
-                            } else {
-                                this.bot.logger.log(`Invalid command in ${file}: missing name or execute`, 'warn', '⚠️');
                             }
                         });
 
-                        this.bot.logger.log(`✅ Loaded ${commands.length} commands from ${file}`, 'success', '📦');
+                        this.bot.logger.log(`Loaded ${commands.length} commands from ${file}`, 'info', '📦');
                     } else {
-                        this.bot.logger.log(`⚠️ ${file} did not return an array`, 'warn', '⚠️');
+                        this.bot.logger.log(`Invalid command format in ${file} - expected array`, 'warn', '⚠️');
                     }
                 } else {
-                    this.bot.logger.log(`⏭️ Skipping ${file} - not a function`, 'debug', '⏭️');
+                    this.bot.logger.log(`Skipping ${file} - not a valid command module`, 'warn', '⚠️');
                 }
             } catch (error) {
                 this.bot.logger.error(error, `CommandHandler.loadCommands (${file})`);
             }
         }
         
-        this.bot.logger.log(`✅ TOTAL COMMANDS LOADED: ${totalCommands}`, 'success', '🚀');
-        this.bot.logger.log(`📋 Command list: ${Array.from(this.commands.keys()).sort().join(', ')}`, 'info', '📋');
+        this.bot.logger.log(`Total commands loaded: ${totalCommands}`, 'success', '✅');
+
+        // Log available commands
+        const commandList = Array.from(this.commands.keys()).sort();
+        this.bot.logger.log(`Available commands: ${commandList.length} commands`, 'debug', '📋');
+
+        // Log AI chat commands specifically
+        const aiCommands = commandList.filter(cmd =>
+            ['megan', 'chatgpt', 'llama', 'gemini', 'aimenu', 'clearmegan', 'changemeganmodel', 'aistatus'].includes(cmd)
+        );
+        if (aiCommands.length > 0) {
+            this.bot.logger.log(`AI Chat Commands loaded: ${aiCommands.join(', ')}`, 'info', '🤖');
+        }
+        
+        // Log AI Image commands specifically
+        const aiImageCommands = commandList.filter(cmd =>
+            ['flux', 'dream', 'generate', 'create', 'aimage'].includes(cmd)
+        );
+        if (aiImageCommands.length > 0) {
+            this.bot.logger.log(`AI Image Commands loaded: ${aiImageCommands.join(', ')}`, 'info', '🖼️');
+        }
     }
 
     registerCommand(command) {
@@ -80,46 +97,30 @@ class CommandHandler {
         }
 
         const commandName = command.name.toLowerCase();
-        
-        // Don't register duplicate commands
-        if (this.commands.has(commandName)) {
-            this.bot.logger.log(`⚠️ Duplicate command: ${commandName} - skipping`, 'debug', '⚠️');
-            return;
-        }
-        
         this.commands.set(commandName, command);
         
-        // Register aliases
         if (command.aliases && Array.isArray(command.aliases)) {
             command.aliases.forEach(alias => {
-                const aliasLower = alias.toLowerCase();
-                if (!this.aliases.has(aliasLower)) {
-                    this.aliases.set(aliasLower, commandName);
-                }
+                this.aliases.set(alias.toLowerCase(), commandName);
             });
         }
         
-        this.bot.logger.log(`➕ Registered: ${commandName}`, 'debug', '➕');
+        this.bot.logger.log(`Registered: ${commandName}`, 'debug', '➕');
     }
 
     async handleCommand(msg, text, from, sender, isGroup) {
-        // Extract command name and args
         const commandText = text.slice(this.bot.settings.PREFIX.length).trim();
-        const parts = commandText.split(/ +/);
-        const commandName = parts[0].toLowerCase();
-        const args = parts.slice(1);
+        const commandName = commandText.split(/ +/)[0].toLowerCase();
+        const args = commandText.slice(commandName.length).trim().split(/ +/);
 
-        this.bot.logger.log(`🔍 Command received: ${commandName}`, 'info', '🔍');
+        this.bot.logger.log(`Command received: ${commandName}`, 'info', '🔍');
 
-        // Find command
         let command = this.commands.get(commandName);
         if (!command && this.aliases.has(commandName)) {
-            const mainCommandName = this.aliases.get(commandName);
-            command = this.commands.get(mainCommandName);
+            command = this.commands.get(this.aliases.get(commandName));
         }
         
         if (!command) {
-            // Command not found
             const similarCommands = this.getSimilarCommands(commandName);
             let suggestion = '';
             if (similarCommands.length > 0) {
@@ -140,25 +141,12 @@ class CommandHandler {
             return;
         }
 
-        // Check owner-only commands
-        if (command.ownerOnly) {
-            const ownerJid = `${this.bot.settings.OWNER_PHONE}@s.whatsapp.net`;
-            if (sender !== ownerJid) {
-                await this.bot.sock.sendMessage(from, {
-                    text: `❌ This command is only for the bot owner.`
-                }, { quoted: msg });
-                return;
-            }
-        }
-
         this.bot.logger.command(commandName, sender, isGroup ? from : '');
         
-        // Optional delay
         if (this.bot.settings.REPLY_DELAY > 0) {
             await new Promise(resolve => setTimeout(resolve, this.bot.settings.REPLY_DELAY));
         }
 
-        // Execute command with ALL parameters
         try {
             await command.execute({
                 msg,
@@ -168,49 +156,27 @@ class CommandHandler {
                 args,
                 command: commandName,
                 text: commandText,
-                bot: this.bot,
-                sock: this.bot.sock
+                bot: this.bot
             });
         } catch (error) {
             this.bot.logger.error(error, `CommandHandler.handleCommand (${commandName})`);
-            
-            // Send user-friendly error
-            const errorMessage = error.message || 'Unknown error';
             await this.bot.sock.sendMessage(from, {
-                text: `❌ Error executing command: ${errorMessage.substring(0, 100)}`
+                text: `❌ Error: ${error.message}`
             }, { quoted: msg });
         }
     }
 
     getSimilarCommands(input) {
         const commands = Array.from(this.commands.keys());
-        return commands.filter(cmd => 
-            cmd.includes(input) || 
-            input.includes(cmd) || 
-            this.calculateLevenshtein(cmd, input) < 3
-        ).slice(0, 5);
-    }
-
-    calculateLevenshtein(a, b) {
-        if (a.length === 0) return b.length;
-        if (b.length === 0) return a.length;
-        const matrix = [];
-        for (let i = 0; i <= b.length; i++) matrix[i] = [i];
-        for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
-        for (let i = 1; i <= b.length; i++) {
-            for (let j = 1; j <= a.length; j++) {
-                if (b.charAt(i - 1) === a.charAt(j - 1)) {
-                    matrix[i][j] = matrix[i - 1][j - 1];
-                } else {
-                    matrix[i][j] = Math.min(
-                        matrix[i - 1][j - 1] + 1,
-                        matrix[i][j - 1] + 1,
-                        matrix[i - 1][j] + 1
-                    );
-                }
+        const similarities = [];
+        
+        for (const cmd of commands) {
+            if (cmd.startsWith(input) || input.startsWith(cmd)) {
+                similarities.push(cmd);
             }
         }
-        return matrix[b.length][a.length];
+        
+        return similarities;
     }
 
     getAllCommands() {
@@ -220,18 +186,41 @@ class CommandHandler {
     getCommand(name) {
         const cmd = this.commands.get(name.toLowerCase());
         if (cmd) return cmd;
+
         const alias = this.aliases.get(name.toLowerCase());
         if (alias) return this.commands.get(alias);
+
         return null;
     }
 
+    // New method: Reload all commands
     reloadCommands() {
-        this.bot.logger.log('🔄 Reloading all commands...', 'info', '🔄');
+        this.bot.logger.log('Reloading all commands...', 'info', '🔄');
+        
+        // Clear existing commands
         this.commands.clear();
         this.aliases.clear();
+        
+        // Reload all command files
         this.loadCommands();
-        this.bot.logger.log('✅ Commands reloaded successfully', 'success', '✅');
+
+        this.bot.logger.log('Commands reloaded successfully', 'success', '✅');
         return true;
+    }
+
+    // New method: Get list of loaded command files
+    getLoadedFiles() {
+        const commandsDir = path.join(__dirname);
+        const allFiles = fs.readdirSync(commandsDir);
+
+        return allFiles.filter(file => {
+            if (!file.endsWith('.js')) return false;
+            if (file === 'index.js' || file.startsWith('index-')) return false;
+            if (file.includes('backup')) return false;
+            if (file.includes('-backup')) return false;
+            if (file.endsWith('.backup.js')) return false;
+            return true;
+        });
     }
 }
 
